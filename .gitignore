@@ -1,0 +1,15 @@
+# Webots / MinGW build artifacts
+*.exe
+*.o
+*.a
+*.dll
+build/
+*.d
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/

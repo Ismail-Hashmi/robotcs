@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <vector>
 
 using namespace webots;
 using namespace managers;
@@ -22,8 +23,8 @@ enum State { SEARCH, APPROACH, ALIGN, KICK };
 class StableOp2 : public Robot {
 public:
   StableOp2()
-    : headYaw(nullptr), headPitch(nullptr), prevBallX(0), prevBallTime(0.0), hadBall(false),
-      previousState(SEARCH), lastKickTime(-100.0) {
+    : headYaw(nullptr), headPitch(nullptr), prevBallX(0), prev2BallX(0), prevBallTime(0.0), hadBall(false),
+      previousState(SEARCH), lastKickTime(-100.0), prevOppCentroidX(0), prevOppTime(0.0), hadOpp(false) {
     timeStep = (int)getBasicTimeStep();
 
     camera = getCamera("Camera");
@@ -61,10 +62,7 @@ public:
     neck = headYaw;
     head = headPitch;
 
-    if (headYaw)
-      headYaw->setPosition(0.0);
-    if (headPitch)
-      headPitch->setPosition(-0.4);
+    applyHeadPose();
   }
 
   void run() {
@@ -73,12 +71,12 @@ public:
 
     const bool motionOk = motion->isCorrectlyInitialized();
     const bool gaitOk = gait->isCorrectlyInitialized();
-    std::cerr << "\n========== SOCCER StableOp2 ==========\n"
+    std::cerr << "\n========== SOCCER StableOp2 (vision: ball, 2-post goal, mates, opp, lines) ==========\n"
               << "timeStep=" << timeStep << " ms\n"
               << "motionManager init=" << motionOk << " motionPlaying=" << motion->isMotionPlaying() << "\n"
               << "gaitManager init=" << gaitOk << "\n"
               << "head_yaw=" << (headYaw ? "ok" : "null") << " head_pitch=" << (headPitch ? "ok" : "null")
-              << "\n====================================\n"
+              << "\n================================================================================\n"
               << std::flush;
 
     enableOp2PositionSensors();
@@ -115,19 +113,22 @@ public:
       const double kickXRef = (width <= 360) ? 160.0 : center;
       const double kickCenterTol = 20.0;
 
-      if (headYaw)
-        headYaw->setPosition(0.0);
-      if (headPitch)
-        headPitch->setPosition(-0.4);
+      applyHeadPose();
 
       double t = getTime();
       double ballSpeed = 0.0;
+      double ballAccelX = 0.0;
       if (found && hadBall) {
         double dt = t - prevBallTime;
-        if (dt > 1e-4)
+        if (dt > 1e-4) {
           ballSpeed = (objX - prevBallX) / dt;
+          double dt2 = t - prevBallTime;
+          if (dt2 > 1e-4 && prev2BallX != prevBallX)
+            ballAccelX = ((objX - prevBallX) - (prevBallX - prev2BallX)) / (dt2 * dt2);
+        }
       }
       if (found) {
+        prev2BallX = prevBallX;
         prevBallX = objX;
         prevBallTime = t;
         hadBall = true;
@@ -135,20 +136,46 @@ public:
         hadBall = false;
       }
 
-      int goalX = width / 2;
-      bool goalSeen = detectGoal(goalX);
+      int goalLeftX = width / 2;
+      int goalRightX = width / 2;
+      int goalMidX = width / 2;
+      int yellowPx = 0;
+      bool goalTwoPosts = false;
+      bool goalSeen = detectGoalTwoPosts(goalLeftX, goalRightX, goalMidX, yellowPx, goalTwoPosts);
 
       int robotPixels = 0;
-      detectOpponentBlue(robotPixels);
+      int oppCentroidX = width / 2;
+      detectOpponentBlue(robotPixels, oppCentroidX);
 
-      int linePixels = 0;
-      detectFieldLines(linePixels);
+      double oppSpeed = 0.0;
+      if (robotPixels > 0 && hadOpp) {
+        double dtp = t - prevOppTime;
+        if (dtp > 1e-4)
+          oppSpeed = (oppCentroidX - prevOppCentroidX) / dtp;
+      }
+      if (robotPixels > 0) {
+        prevOppCentroidX = oppCentroidX;
+        prevOppTime = t;
+        hadOpp = true;
+      } else {
+        hadOpp = false;
+      }
+
+      int matePixels = 0;
+      int mateCentroidX = width / 2;
+      detectTeammateRed(matePixels, mateCentroidX);
+
+      int lineTotal = 0;
+      int lineBoundary = 0;
+      int lineCenterCircle = 0;
+      int linePenalty = 0;
+      classifyFieldLines(height, width, lineTotal, lineBoundary, lineCenterCircle, linePenalty);
 
       int ballCloseThresh = std::max(50, width * height / 700);
       bool ballClose = found && objSize > ballCloseThresh;
       bool ballCenteredKick = found && fabs((double)objX - kickXRef) < kickCenterTol;
       bool goalAligned =
-          goalSeen && fabs((double)goalX - center) < (double)kGoalCenterTolPx;
+          goalSeen && fabs((double)goalMidX - center) < (double)kGoalCenterTolPx;
 
       bool canKickAgain = (t - lastKickTime) >= kKickCooldown;
       bool kickReady =
@@ -190,12 +217,17 @@ public:
               xAmp = 1.0;
               aAmp = -turn;
             }
+            if (matePixels > kMateCrowdPixels && fabs((double)mateCentroidX - center) < (double)width * 0.22) {
+              xAmp *= 0.72;
+              aAmp += (mateCentroidX < (int)center ? 0.12 : -0.12);
+              aAmp = clamp(aAmp, -0.45, 0.45);
+            }
             break;
           }
 
           case ALIGN: {
             xAmp = 0.0;
-            double gNorm = 2.0 * goalX / (double)width - 1.0;
+            double gNorm = 2.0 * goalMidX / (double)width - 1.0;
             aAmp = clamp(-0.42 * gNorm, -0.48, 0.48);
             break;
           }
@@ -212,8 +244,16 @@ public:
           std::cerr << std::fixed << std::setprecision(2)
                     << "[move] state=" << stateName(state) << " xAmp=" << xAmp << " aAmp=" << aAmp
                     << " ball=" << (found ? "yes" : "no") << " x=" << objX << " sz=" << objSize << "\n";
-          std::cerr << std::fixed << std::setprecision(1) << "[vision] vx=" << ballSpeed << " gx=" << goalX
-                    << " bluePx=" << robotPixels << " whitePx=" << linePixels << std::endl;
+          std::cerr << std::fixed << std::setprecision(1)
+                    << "[ball] vx=" << ballSpeed << " ax~=" << ballAccelX << " | [goal] mid=" << goalMidX
+                    << " L=" << goalLeftX << " R=" << goalRightX << " yel=" << yellowPx
+                    << " 2post=" << (goalTwoPosts ? 1 : 0) << "\n";
+          std::cerr << std::fixed << std::setprecision(1)
+                    << "[agents] bluePx=" << robotPixels << " oppX=" << oppCentroidX << " ovx=" << oppSpeed
+                    << " | redPx=" << matePixels << " mateX=" << mateCentroidX << "\n";
+          std::cerr << std::fixed << std::setprecision(0)
+                    << "[lines] tot=" << lineTotal << " bound=" << lineBoundary << " circ=" << lineCenterCircle
+                    << " pen=" << linePenalty << std::endl;
         }
       }
 
@@ -231,9 +271,8 @@ public:
         while (motion->isMotionPlaying())
           step(timeStep);
 
-        int kickPage = (goalX < (int)center) ? 13 : 12;
-        std::cerr << "[move] KICK playPage(" << kickPage << ") (API: isMotionPlaying not isRunning)\n"
-                  << std::flush;
+        int kickPage = (goalMidX < (int)center) ? 13 : 12;
+        std::cerr << "[move] KICK playPage(" << kickPage << ")\n" << std::flush;
         motion->playPage(kickPage);
         while (motion->isMotionPlaying())
           step(timeStep);
@@ -277,10 +316,32 @@ private:
   RobotisOp2GaitManager *gait;
 
   int prevBallX;
+  int prev2BallX;
   double prevBallTime;
   bool hadBall;
   State previousState;
   double lastKickTime;
+
+  int prevOppCentroidX;
+  double prevOppTime;
+  bool hadOpp;
+
+  static constexpr double kHeadPitchTargetRad = -0.35;
+
+  void applyHeadPose() {
+    if (headYaw)
+      headYaw->setPosition(0.0);
+    if (!headPitch)
+      return;
+    double p = kHeadPitchTargetRad;
+    const double lo = headPitch->getMinPosition();
+    const double hi = headPitch->getMaxPosition();
+    if (std::isfinite(lo))
+      p = std::max(p, lo);
+    if (std::isfinite(hi))
+      p = std::min(p, hi);
+    headPitch->setPosition(p);
+  }
 
   void enableOp2PositionSensors() {
     static const char *names[] = {"ShoulderR", "ShoulderL", "ArmUpperR", "ArmUpperL", "ArmLowerR", "ArmLowerL",
@@ -297,10 +358,12 @@ private:
 
   static constexpr int kGoalCenterTolPx = 44;
   static const int kAvoidBlueThreshold = 2600;
+  static const int kMateCrowdPixels = 650;
   static const int kLogEveryNSteps = 30;
   static const int kVisionScanStep = 6;
   static const int kKickMinBallPixels = 9000;
   static constexpr double kKickCooldown = 3.5;
+  static const int kMinGapSplitPostsPx = 22;
 
   static int samplesInScan(int w, int h, int step) {
     int nx = (w + step - 1) / step;
@@ -370,14 +433,15 @@ private:
     return true;
   }
 
-  bool detectGoal(int &goalX) {
+  // Yellow goal posts: 1D gap split → left / right post centroids + midpoint (bearing target).
+  bool detectGoalTwoPosts(int &goalLeftX, int &goalRightX, int &goalMidX, int &yellowPx, bool &twoPosts) {
     const unsigned char *img = camera->getImage();
     int w = camera->getWidth();
     int h = camera->getHeight();
     const int st = kVisionScanStep;
 
-    int count = 0;
-    long sumX = 0;
+    std::vector<int> xs;
+    xs.reserve(512);
 
     for (int x = 0; x < w; x += st) {
       for (int y = 0; y < h; y += st) {
@@ -386,23 +450,71 @@ private:
         int b = Camera::imageGetBlue(img, w, x, y);
 
         if (r > 175 && g > 175 && b < 130) {
-          count++;
-          sumX += x;
+          xs.push_back(x);
         }
       }
     }
 
+    yellowPx = (int)xs.size();
     int sRef = samplesInScan(w, h, 3);
     int sCur = samplesInScan(w, h, st);
     int minGoal = std::max(20, (100 * sCur) / std::max(1, sRef));
-    if (count < minGoal)
+    if (yellowPx < minGoal)
       return false;
 
-    goalX = (int)(sumX / count);
+    std::sort(xs.begin(), xs.end());
+
+    int bestGap = 0;
+    size_t splitAfter = 0;
+    for (size_t i = 0; i + 1 < xs.size(); ++i) {
+      int g = xs[i + 1] - xs[i];
+      if (g > bestGap) {
+        bestGap = g;
+        splitAfter = i;
+      }
+    }
+
+    twoPosts = (bestGap >= kMinGapSplitPostsPx && xs.size() >= 30);
+
+    if (!twoPosts) {
+      long s = 0;
+      for (int x : xs)
+        s += x;
+      goalMidX = (int)(s / (long)xs.size());
+      goalLeftX = goalRightX = goalMidX;
+      return true;
+    }
+
+    int splitX = (xs[splitAfter] + xs[splitAfter + 1]) / 2;
+    long sumL = 0, sumR = 0;
+    int nL = 0, nR = 0;
+    for (int x : xs) {
+      if (x < splitX) {
+        sumL += x;
+        nL++;
+      } else {
+        sumR += x;
+        nR++;
+      }
+    }
+    if (nL < 1 || nR < 1) {
+      long s = 0;
+      for (int x : xs)
+        s += x;
+      goalMidX = (int)(s / (long)xs.size());
+      goalLeftX = goalRightX = goalMidX;
+      twoPosts = false;
+      return true;
+    }
+    goalLeftX = (int)(sumL / nL);
+    goalRightX = (int)(sumR / nR);
+    if (goalLeftX > goalRightX)
+      std::swap(goalLeftX, goalRightX);
+    goalMidX = (goalLeftX + goalRightX) / 2;
     return true;
   }
 
-  bool detectOpponentBlue(int &blueCount) {
+  void detectOpponentBlue(int &blueCount, int &centroidX) {
     const unsigned char *img = camera->getImage();
     int w = camera->getWidth();
     int h = camera->getHeight();
@@ -410,34 +522,85 @@ private:
     const int st = kVisionScanStep;
 
     blueCount = 0;
+    long sumX = 0;
     for (int x = 0; x < w; x += st) {
       for (int y = y0; y < h; y += st) {
         int r = Camera::imageGetRed(img, w, x, y);
         int g = Camera::imageGetGreen(img, w, x, y);
         int b = Camera::imageGetBlue(img, w, x, y);
-        if (b > 140 && r < 110 && g < 110)
+        if (b > 140 && r < 110 && g < 110) {
           blueCount++;
+          sumX += x;
+        }
       }
     }
-    return blueCount > 0;
+    centroidX = (blueCount > 0) ? (int)(sumX / blueCount) : w / 2;
   }
 
-  bool detectFieldLines(int &whiteCount) {
+  // Red jersey (teammate): exclude orange ball mask and very dark ball panels.
+  void detectTeammateRed(int &redCount, int &centroidX) {
     const unsigned char *img = camera->getImage();
     int w = camera->getWidth();
     int h = camera->getHeight();
+    int y0 = h / 3;
+    const int st = kVisionScanStep;
 
-    whiteCount = 0;
-    for (int x = 0; x < w; x += kVisionScanStep) {
-      for (int y = 0; y < h; y += kVisionScanStep) {
+    redCount = 0;
+    long sumX = 0;
+    for (int x = 0; x < w; x += st) {
+      for (int y = y0; y < h; y += st) {
+        int r = Camera::imageGetRed(img, w, x, y);
+        int gc = Camera::imageGetGreen(img, w, x, y);
+        int b = Camera::imageGetBlue(img, w, x, y);
+
+        bool orangeBall = (r > 150 && gc < 120 && b < 120);
+        bool darkBall = (r < 95 && gc < 95 && b < 95);
+        if (orangeBall || darkBall)
+          continue;
+
+        bool redJersey =
+            (r > 88 && r > gc + 22 && r > b + 22 && gc < 135 && b < 135 && (r + gc + b) > 140);
+        if (redJersey) {
+          redCount++;
+          sumX += x;
+        }
+      }
+    }
+    centroidX = (redCount > 0) ? (int)(sumX / redCount) : w / 2;
+  }
+
+  // ROI "Hough-lite": classify line-like whites by image region (boundary vs centre circle vs penalty hints).
+  void classifyFieldLines(int h, int w, int &whiteTotal, int &scoreBoundary, int &scoreCenterCircle, int &scorePenalty) {
+    const unsigned char *img = camera->getImage();
+    const int st = kVisionScanStep;
+
+    whiteTotal = 0;
+    scoreBoundary = 0;
+    scoreCenterCircle = 0;
+    scorePenalty = 0;
+
+    const int yB0 = (h * 3) / 4;
+    const int yC0 = h / 4;
+    const int yC1 = (h * 3) / 4;
+    const int xBand = std::max(8, w / 5);
+
+    for (int x = 0; x < w; x += st) {
+      for (int y = 0; y < h; y += st) {
         int r = Camera::imageGetRed(img, w, x, y);
         int g = Camera::imageGetGreen(img, w, x, y);
         int b = Camera::imageGetBlue(img, w, x, y);
-        if (r > 195 && g > 195 && b > 195)
-          whiteCount++;
+        if (r <= 195 || g <= 195 || b <= 195)
+          continue;
+
+        whiteTotal++;
+        if (y >= yB0)
+          scoreBoundary++;
+        if (y >= yC0 && y <= yC1 && std::abs(x - w / 2) < (w / 2 - xBand))
+          scoreCenterCircle++;
+        if (y > h / 2 && (x < xBand || x > w - xBand))
+          scorePenalty++;
       }
     }
-    return whiteCount > 0;
   }
 };
 

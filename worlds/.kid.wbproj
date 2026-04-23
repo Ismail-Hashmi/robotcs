@@ -8,11 +8,11 @@ centralWidgetVisible: 1
 orthographicViewHeight: 1
 textFiles: 1 "protos/RobocupSoccerField.proto" "controllers/soccer/Soccer.cpp"
 consoles: Console:All:All
-renderingDevicePerspectives: player blue 1:Camera;0;0.928505;0;0.700611
-renderingDevicePerspectives: player blue 2:Camera;0;1;0.672764;0
+renderingDevicePerspectives: player blue 1:Camera;0;0.530567;0;0.700611
+renderingDevicePerspectives: player blue 2:Camera;0;0.779116;0.672764;0
 renderingDevicePerspectives: player blue 3:Camera;0;1;0.557702;0
 renderingDevicePerspectives: player blue 4:Camera;0;1;0.287206;0
 renderingDevicePerspectives: player red 1:Camera;0;1;0;0
-renderingDevicePerspectives: player red 2:Camera;0;0.93169;0.672764;0.699593
-renderingDevicePerspectives: player red 3:Camera;0;0.928505;0.577546;0.700611
+renderingDevicePerspectives: player red 2:Camera;0;0.532399;0.672764;0.699593
+renderingDevicePerspectives: player red 3:Camera;0;0.530567;0.577546;0.700611
 renderingDevicePerspectives: player red 4:Camera;1;0.733515;0;0

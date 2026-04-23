@@ -171,8 +171,6 @@ public:
       int linePenalty = 0;
       classifyFieldLines(height, width, lineTotal, lineBoundary, lineCenterCircle, linePenalty);
 
-      int ballCloseThresh = std::max(50, width * height / 700);
-      bool ballClose = found && objSize > ballCloseThresh;
       bool ballCenteredKick = found && fabs((double)objX - kickXRef) < kickCenterTol;
       bool goalAligned =
           goalSeen && fabs((double)goalMidX - center) < (double)kGoalCenterTolPx;
@@ -184,9 +182,9 @@ public:
       State state;
       if (!found)
         state = SEARCH;
-      else if (robotPixels > kAvoidBlueThreshold)
+      else if (robotPixels > kAvoidBlueThreshold && !(found && objSize >= kBallApproachIgnoreBlueMin))
         state = APPROACH;
-      else if (ballClose && found && goalSeen && !goalAligned)
+      else if (found && goalSeen && !goalAligned && objSize >= kAlignMinBallPixels)
         state = ALIGN;
       else if (kickReady)
         state = KICK;
@@ -210,9 +208,12 @@ public:
           case APPROACH: {
             double turn = ((double)objX - center) / std::max(1.0, center);
             turn = clamp(turn, -0.5, 0.5);
-            if (robotPixels > kAvoidBlueThreshold) {
-              xAmp = 0.08;
-              aAmp = 0.32;
+            const bool heavyBlue = robotPixels > kAvoidBlueThreshold;
+            const bool ballChase = found && objSize >= kBallApproachIgnoreBlueMin;
+            // Always yaw toward ball centroid; only reduce forward speed when blue is high and ball still small.
+            if (heavyBlue && !ballChase) {
+              xAmp = 0.18;
+              aAmp = clamp(-turn * 1.15, -0.48, 0.48);
             } else {
               xAmp = 1.0;
               aAmp = -turn;
@@ -271,7 +272,8 @@ public:
         while (motion->isMotionPlaying())
           step(timeStep);
 
-        int kickPage = (goalMidX < (int)center) ? 13 : 12;
+        // Yellow goal midpoint left of image centre → kick with page 12; right → 13 (swap if shots mirror wrong way).
+        int kickPage = (goalMidX < (int)center) ? 12 : 13;
         std::cerr << "[move] KICK playPage(" << kickPage << ")\n" << std::flush;
         motion->playPage(kickPage);
         while (motion->isMotionPlaying())
@@ -358,10 +360,16 @@ private:
 
   static constexpr int kGoalCenterTolPx = 44;
   static const int kAvoidBlueThreshold = 2600;
+  // When the ball blob is at least this big, always steer toward the ball (do not use
+  // fixed "avoidance" yaw that ignores ball bearing — that made the robot curve away from the ball).
+  static const int kBallApproachIgnoreBlueMin = 350;
   static const int kMateCrowdPixels = 650;
   static const int kLogEveryNSteps = 30;
   static const int kVisionScanStep = 6;
   static const int kKickMinBallPixels = 9000;
+  // Only enter ALIGN when the ball blob is this large; otherwise goal-in-view would
+  // freeze forward gait (xAmp=0) while the ball is still small / far away.
+  static const int kAlignMinBallPixels = 5200;
   static constexpr double kKickCooldown = 3.5;
   static const int kMinGapSplitPostsPx = 22;
 
